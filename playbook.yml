@@ -1,0 +1,42 @@
+---
+- name: Test s3
+  hosts: local
+  connection: local
+
+  vars:
+    eks_cluster_name: jenkins
+    eks_region: eu-central-1
+    eks_version: 1.18
+    ansible_python_interpreter: /Users/patrick/venvs/ansible/bin/python3
+
+  tasks:
+    - name: Check is EKS cluster already created
+      ansible.builtin.script:
+        cmd: /usr/local/bin/eksctl get cluster --name {{ eks_cluster_name }}
+      register: myoutput
+      ignore_errors: true
+
+    - name: Create an EKS cluster backed by Fargate. This cluster will have no EC2 instances
+      ansible.builtin.script:
+        cmd: /usr/local/bin/eksctl create cluster --name {{ eks_cluster_name }} --region {{ eks_region }} --version {{ eks_version }} --fargate
+      when: myoutput is search("ResourceNotFoundException")
+
+    - name: Get VPC Infos
+      amazon.aws.ec2_vpc_net_info:
+        region: "{{ eks_region }}"
+        filters:
+          "tag:eksctl.cluster.k8s.io/v1alpha1/cluster-name": "{{ eks_cluster_name }}"
+      register: vpc_infos
+
+    - name: Setting vpc_id and cidr_block
+      set_fact:
+        vpc_id: "{{ vpc_infos.vpcs[0].vpc_id }}"
+        cidr_block: "{{ vpc_infos.vpcs[0].cidr_block }}"
+
+    - debug:
+        msg: "vpc_id    : {{ vpc_id }}"
+
+    - debug:
+        msg: "cidr_block: {{ cidr_block }}"
+
+  
