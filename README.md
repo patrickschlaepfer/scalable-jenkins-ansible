@@ -1,8 +1,15 @@
-# scale-jenkins ansible
+# scalable-jenkins-ansible
+
+Should create an EKS fargate Cluster with a running Jenkins Instance.
+
+Based on this article: https://aws.amazon.com/de/blogs/containers/how-to-build-container-images-with-amazon-eks-on-fargate/
+
+## AWS Ansible Collection Doku
+
 
 https://github.com/ansible-collections/community.aws/blob/main/docs/community.aws.aws_eks_cluster_module.rst
 
-## Installation Collection
+## Installating AWS Collection
 
     ansible-galaxy collection install -r requirements.yml
 
