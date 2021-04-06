@@ -1,5 +1,5 @@
 ---
-- name: Test s3
+- name: Create a Jenkins EKS farget Cluster
   hosts: local
   connection: local
 
@@ -28,6 +28,9 @@
           "tag:eksctl.cluster.k8s.io/v1alpha1/cluster-name": "{{ eks_cluster_name }}"
       register: vpc_infos
 
+    - debug:
+        msg: "vpc_infos: {{ vpc_infos }}"
+
     - name: Setting vpc_id and cidr_block
       set_fact:
         vpc_id: "{{ vpc_infos.vpcs[0].vpc_id }}"
@@ -38,5 +41,136 @@
 
     - debug:
         msg: "cidr_block: {{ cidr_block }}"
+      
+    - name: Creating a security Group for EFS
+      amazon.aws.ec2_group:
+        name: "{{ eks_cluster_name }}-on-Fargate"
+        description: "{{ eks_cluster_name }}-on-Fargate"
+        region: "{{ eks_region }}"
+        state: present
+        rules:
+          - proto: tcp
+            ports: 2049
+            cidr: "{{ cidr_block }}"
+        vpc_id: '{{ vpc_id }}'
+      register: setup_security_groups
 
-  
+    - name: Setting Security Group Id
+      set_fact:
+        security_group_id: "{{ setup_security_groups.group_id }}"
+
+    - debug:
+        msg: "security_group_id: {{ security_group_id }}"
+
+    - name: Creating an EFS filesystem
+      community.aws.efs:
+        name: "{{ eks_cluster_name }}-on-Fargate"
+        state: present
+        region: "{{ eks_region }}"
+        throughput_mode: bursting
+        performance_mode: general_purpose
+        encrypt: yes
+        tags:
+          Name: "{{ eks_cluster_name }}Volume"
+        wait: yes
+      register: efs_filesystem
+
+    - debug:
+        msg: "efs_filesystem: {{ efs_filesystem }}"
+    
+    - set_fact:
+        efs_filesystem_id: "{{ efs_filesystem.efs.file_system_id }}"
+
+    - name: Creating mount targets
+      ansible.builtin.shell: >
+        for subnet in $(aws eks describe-fargate-profile \
+        --output text \
+        --cluster-name {{ eks_cluster_name }} \
+        --region {{ eks_region }}  \
+        --fargate-profile-name fp-default  \
+        --query "fargateProfile.subnets"); \
+        do (aws efs create-mount-target \
+        --file-system-id {{ efs_filesystem_id }} \
+        --subnet-id $subnet \
+        --security-group {{ security_group_id }} \
+        --region {{ eks_region }} \
+        --output text); \
+        done
+      register: creating_mount_targets
+
+    - debug:
+       msg: "creating_mount_targets: {{ creating_mount_targets }}"
+      
+    - name: Creating EFS access points
+      ansible.builtin.shell: >
+        aws efs create-access-point \
+        --file-system-id {{ efs_filesystem_id }} \
+        --posix-user Uid=1000,Gid=1000 \
+        --root-directory "Path=/jenkins,CreationInfo={OwnerUid=1000,OwnerGid=1000,Permissions=777}" \
+        --region {{ eks_region }} \
+        --query 'AccessPointId' \
+        --output text
+      register: efs_access_points
+
+    - debug:
+        msg: "efs_access_points: {{ efs_access_points.stdout }}"
+
+    - name: Create CSIDriver
+      community.kubernetes.k8s:
+        state: present
+        definition:
+          apiVersion: storage.k8s.io/v1beta1
+          kind: CSIDriver
+          metadata:
+            name: efs.csi.aws.com
+          spec:
+            attachRequired: false
+
+    - name: Create StorageClass
+      community.kubernetes.k8s:
+        state: present
+        definition:
+          apiVersion: storage.k8s.io/v1beta1
+          kind: StorageClass
+          metadata:
+            name: efs-sc
+          provisioner: efs.csi.aws.com
+
+    - name: Create PersistentVolume
+      community.kubernetes.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: PersistentVolume
+          metadata:
+            name: jenkins-efs-pv
+          spec:
+            capacity:
+              storage: 5Gi
+            volumeMode: Filesystem
+            accessModes:
+              - ReadWriteMany
+            persistentVolumeReclaimPolicy: Retain
+            storageClassName: efs-sc
+            csi:
+              driver: efs.csi.aws.com
+              volumeHandle: "{{ efs_filesystem_id }}::{{ efs_access_points.stdout }}"
+      ignore_errors: true
+
+    - name: Create PersistentVolumeClaim
+      community.kubernetes.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: jenkins-efs-claim
+            namespace: kube-system
+          spec:
+            accessModes:
+              - ReadWriteMany
+            storageClassName: efs-sc
+            resources:
+              requests:
+                storage: 5Gi
+
